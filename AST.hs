@@ -6,6 +6,7 @@ module AST where
 data Exp
   = ConstExp Constant
   | VarExp Variable
+  | DataExp Constructor
   | App Exp Exp
   | Lam Pattern Exp
   | Let Pattern Exp Exp

@@ -42,7 +42,18 @@ pattern = (char '(' *> spaces *> pattern <* spaces <* char ')') <|>
 --   We also must be able to parse Applications (App), Lambdas (Lam),
 --   Let bindings (Let), Letrec bindings (Letrec), and Case statements.
 expression :: Parser Exp
-expression = undefined
+expression = lambda <|> 
+             letp <|> 
+             letrec <|> 
+             casep <|> 
+             (constant >>= pure . ConstExp) <|>
+             -- ^ All of the things that can't be applied without being in parens
+             do {
+                  x <- (variable >>= pure . VarExp) <|> (constructor >>= pure . DataExp) <|>
+                       (char '(' *> spaces *> expression <* spaces <* char ')');
+                  (try (do { e <- spaces *> expression; pure (App x e);}) <|> pure x)
+                }
+                
 
 lambda :: Parser Exp
 lambda = do { char '\\';
@@ -76,5 +87,19 @@ letrec = do { string "letrec";
               e <- spaces *> expression;
               pure $ Letrec bs e }
 
+
+case_sendings :: Parser [(Pattern, Exp)]
+case_sendings = do { p <- spaces *> pattern <* spaces;
+                     string "->";
+                     e <- spaces *> expression <* spaces;
+                     (try $ do { newline;
+                                 ps <- case_sendings;
+                                 pure ((p, e) : ps); }) <|>
+                     (pure $ pure (p, e)) }
+
 casep :: Parser Exp
-casep = undefined
+casep = do { string "case";
+             v <- spaces *> variable <* spaces;
+             string "of";
+             s <- case_sendings;
+             pure $ Case v s }
