@@ -14,25 +14,51 @@ import Control.Monad.Identity
 type Parser x = ParsecT String () Identity x
 
 -- | Constants are simply natural numbers.
+
+schar :: Parser Char
+schar = (char '\\' *> anyChar >>= \c -> case c of
+           '\\' -> pure '\\'
+           'n' -> pure '\n'
+           't' -> pure '\t'
+           'r' -> pure '\r'
+           '"' -> pure '"'
+           'x' -> do { a <- hexDigit; b <- hexDigit; pure $ intToDigit ((16 * digitToInt a) + digitToInt b) } ) <|>
+        (satisfy (\x -> x /= '"'))
+
 constant :: Parser Constant
-constant = many1 digit >>= pure . NatC . \ns -> toInteger $ sum $ zipWith (*) [10 ^ n | n <- [0..]] $ map digitToInt $ reverse ns
+constant = (char '"' *> (many (satisfy (\x -> x /= '"')) <* char '"') >>= \str -> pure $ StringC str) <|>
+           (char '\'' *> (schar >>= \c -> pure $ CharC c) <* char '\'') <|>
+           (do { neg <- (char '-' *> pure True) <|> pure False;
+                n <- (many1 digit >>= pure 
+                                . \ns -> (toInteger 
+                                . sum  
+                                . zipWith (*) [10 ^ n | n <- [0..]]) 
+                                $ map digitToInt $ reverse ns);
+                if neg then pure $ IntegerC (-n) else pure $ IntegerC n }) 
 
 -- | A variable is a sequence of lowercase letters
-variable :: Parser Variable
-variable = do { xs <- many1 lower;
-                if xs `elem` ["in", "let", "letrec"] then fail "Nothing good here" else pure $ Free xs }
+variable :: Parser Variable 
+variable = do { xs <- many1 (lower <|> char '\'');
+                if xs `elem` ["in", "let", "letrec"] 
+                  then fail "Nothing good here" 
+                  else pure $ Free xs }
 
 -- | A constructor begins with a capital letter and ends with lowercase letters
 constructor :: Parser String
-constructor = do { x <- upper; xs <- many lower; pure (x : xs) }
+constructor = do { x <- upper;
+                   xs <- many lower; 
+                   pure (x : xs) }
 
 -- | In order to parse patterns, I must be able to parse variables, constants,
 --   constructors, and nested patterns.
 pattern :: Parser Pattern
-pattern = (char '(' *> spaces *> pattern <* spaces <* char ')') <|>
+pattern = (char '(' *> whitespace *> pattern <* whitespace <* char ')') <|>
           (constant >>= pure . ConstPat) <|> 
           (variable >>= pure . VarPat) <|>
-          (do { c <- constructor; xs <- many (spaces *> pattern <* spaces) ; pure $ DataPat c xs })
+     --     (constructor >>= pure . DataExp) <|>
+          (do { c <- constructor; 
+                xs <- many (whitespace *> pattern <* whitespace); 
+                pure $ DataPat c xs })
 
 -- | In order to parse expressions, we can reuse much of the above:
 --   Constants (ConstExp)
@@ -41,65 +67,70 @@ pattern = (char '(' *> spaces *> pattern <* spaces <* char ')') <|>
 --   
 --   We also must be able to parse Applications (App), Lambdas (Lam),
 --   Let bindings (Let), Letrec bindings (Letrec), and Case statements.
-expression :: Parser Exp
-expression = lambda <|> 
-             letp <|> 
-             letrec <|> 
-             casep <|> 
-             (constant >>= pure . ConstExp) <|>
-             -- ^ All of the things that can't be applied without being in parens
-             do {
-                  x <- (variable >>= pure . VarExp) <|> (constructor >>= pure . DataExp) <|>
-                       (char '(' *> spaces *> expression <* spaces <* char ')');
-                  (try (do { e <- spaces *> expression; pure (App x e);}) <|> pure x)
-                }
+baseexpression :: Parser Exp
+baseexpression = (char '(' *> expression <* char ')') <|>
+                 lambda <|> 
+                 lets <|> 
+                 casep <|> 
+                 (constant >>= pure . ConstExp) <|>
+                 (constructor >>= pure . DataExp) <|>
+                 (variable >>= pure . VarExp)
+                 -- ^ All of the things that can't be applied without being in parens
                 
+
+expression :: Parser Exp
+expression = many1 (whitespace *> baseexpression <* whitespace)
+  >>= \(e:es) -> pure $ foldr (flip App) e es
+
 
 lambda :: Parser Exp
 lambda = do { char '\\';
-              p <- spaces *> pattern <* spaces;
+              p <- whitespace *> pattern <* whitespace;
               char '.';
-              e <- spaces *> expression;
+              e <- whitespace *> expression;
               pure $ Lam p e }
 
+binding :: Parser (Pattern, Exp)
+binding = do
+  p <- pattern
+  whitespace *> char '=' <* whitespace
+  e <- expression
+  pure (p, e)
 
-letp :: Parser Exp
-letp = do { string "let";
-            p <- spaces *> pattern <* spaces;
-            char '=';
-            e <- spaces *> expression <* spaces;
-            string "in";
-            e <- spaces *> expression;
-            pure $ Let p e e }
+bindings :: Parser [(Pattern, Exp)]
+bindings = do
+  b <- whitespace *> binding <* whitespace;
+  bs <- many (whitespace *> char ';' *> whitespace *> binding <* whitespace);
+  pure (b:bs)
 
-letrec_bindings :: Parser [(Pattern, Exp)]
-letrec_bindings = do { p <- spaces *> pattern <* spaces;
-                       char '=';
-                       e <- spaces *> expression <* spaces;
-                       ((string "in" *> pure [(p, e)]) <|> 
-                       (do { newline; 
-                             ps <- letrec_bindings; 
-                             pure ((p, e) : ps); })) }
+lets :: Parser Exp
+lets = string "let" *>
+      (do {
+           whitespace; 
+           char '{';  
+           bs <- bindings;
+           char '}';
+           whitespace;
+           string "in";
+           whitespace;
+           e <- expression;
+           pure $ Letrec bs e})
 
-letrec :: Parser Exp
-letrec = do { string "letrec";
-              bs <- letrec_bindings;
-              e <- spaces *> expression;
-              pure $ Letrec bs e }
+whitespace = many $ oneOf " \n\r\t"
 
 
 case_sendings :: Parser [(Pattern, Exp)]
-case_sendings = do { p <- spaces *> pattern <* spaces;
-                     string "->";
-                     e <- spaces *> expression <* spaces;
-                     (try $ do { newline;
-                                 ps <- case_sendings;
-                                 pure ((p, e) : ps); }) <|>
-                     (pure $ pure (p, e)) }
+case_sendings = do { p <- whitespace *> pattern;
+                     whitespace *> string "->" <* whitespace;
+                     e <- whitespace *> expression <* whitespace;
+                     (char '}' *> pure [(p, e)]) <|> 
+                     (char ';' *> (case_sendings >>= \ps -> pure ((p, e) : ps))) }
 
 casep :: Parser Exp
 casep = do { string "case";
-             v <- spaces *> variable <* spaces;
-             string "of";
+             v <- whitespace *> variable <* whitespace;
+             string "of" *> whitespace *> char '{';
              s <- case_sendings;
              pure $ Case v s }
+
+

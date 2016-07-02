@@ -1,0 +1,5 @@
+y = \y.\x.case x of { (P x) -> "\\"; (Z y) -> 104; (A z) -> '\n' };
+
+V x z = 104;
+
+a = "hello world"

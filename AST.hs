@@ -19,7 +19,9 @@ data Pattern
   | DataPat Constructor [Pattern] deriving Show
 
 data Constant
-  = NatC Integer deriving Show
+  = IntegerC Integer
+  | StringC String 
+  | CharC Char deriving Show
 
 data Variable
   = Bound Int
